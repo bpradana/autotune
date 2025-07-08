@@ -1,4 +1,4 @@
-# Autotune: Production-Ready Go GC Tuning for Containers
+# Autotune: Go GC Tuning for Containers
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/bpradana/autotune.svg)](https://pkg.go.dev/github.com/bpradana/autotune)
 [![Go Report Card](https://goreportcard.com/badge/github.com/bpradana/autotune)](https://goreportcard.com/report/github.com/bpradana/autotune)
