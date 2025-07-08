@@ -1,0 +1,249 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: autotune-demo
+  namespace: default
+  labels:
+    app: autotune-demo
+    version: v1.0.0
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: autotune-demo
+  template:
+    metadata:
+      labels:
+        app: autotune-demo
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: autotune-demo
+        image: autotune-demo:latest
+        ports:
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        env:
+        # Autotune configuration via environment variables
+        - name: AUTOTUNE_ENABLED
+          value: "true"
+        - name: AUTOTUNE_MONITOR_INTERVAL
+          value: "30s"
+        - name: AUTOTUNE_MIN_GOGC
+          value: "50"
+        - name: AUTOTUNE_MAX_GOGC
+          value: "800"
+        - name: AUTOTUNE_TARGET_LATENCY
+          value: "10ms"
+        - name: AUTOTUNE_MEMORY_LIMIT_PERCENT
+          value: "0.8"
+        - name: AUTOTUNE_TUNING_AGGRESSIVENESS
+          value: "0.3"
+        - name: AUTOTUNE_OBSERVABILITY_PORT
+          value: "8080"
+        # Application configuration
+        - name: APP_PORT
+          value: "8000"
+        - name: LOG_LEVEL
+          value: "info"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65534
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      securityContext:
+        fsGroup: 65534
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: autotune-demo-metrics
+  namespace: default
+  labels:
+    app: autotune-demo
+    service: metrics
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: metrics
+    protocol: TCP
+    name: metrics
+  selector:
+    app: autotune-demo
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: autotune-demo-app
+  namespace: default
+  labels:
+    app: autotune-demo
+    service: app
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8000
+    targetPort: http
+    protocol: TCP
+    name: http
+  selector:
+    app: autotune-demo
+---
+# ServiceMonitor for Prometheus scraping
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: autotune-demo
+  namespace: default
+  labels:
+    app: autotune-demo
+spec:
+  selector:
+    matchLabels:
+      app: autotune-demo
+      service: metrics
+  endpoints:
+  - port: metrics
+    path: /metrics
+    params:
+      format: ['prometheus']
+    interval: 30s
+    scrapeTimeout: 10s
+    honorLabels: true
+---
+# HorizontalPodAutoscaler based on memory usage
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: autotune-demo-hpa
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: autotune-demo
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+---
+# PodDisruptionBudget to ensure availability during updates
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: autotune-demo-pdb
+  namespace: default
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: autotune-demo
+---
+# NetworkPolicy for security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: autotune-demo-netpol
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app: autotune-demo
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 8080
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-system
+    ports:
+    - protocol: TCP
+      port: 8000
+  egress:
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 443

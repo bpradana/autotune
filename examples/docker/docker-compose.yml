@@ -1,0 +1,139 @@
+version: '3.8'
+
+services:
+  # Autotune demo application
+  autotune-demo:
+    build:
+      context: ../../
+      dockerfile: examples/docker/Dockerfile
+    container_name: autotune-demo
+    ports:
+      - "8080:8080"  # Metrics endpoint
+      - "8000:8000"  # Application endpoint
+    environment:
+      # Autotune configuration
+      - AUTOTUNE_ENABLED=true
+      - AUTOTUNE_MONITOR_INTERVAL=15s
+      - AUTOTUNE_MIN_GOGC=50
+      - AUTOTUNE_MAX_GOGC=800
+      - AUTOTUNE_TARGET_LATENCY=10ms
+      - AUTOTUNE_MEMORY_LIMIT_PERCENT=0.8
+      - AUTOTUNE_TUNING_AGGRESSIVENESS=0.3
+      - AUTOTUNE_OBSERVABILITY_PORT=8080
+      # Application configuration
+      - APP_PORT=8000
+      - LOG_LEVEL=info
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - autotune-network
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=8080"
+      - "prometheus.path=/metrics"
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: autotune-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    restart: unless-stopped
+    networks:
+      - autotune-network
+    depends_on:
+      - autotune-demo
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:10.0.0
+    container_name: autotune-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    restart: unless-stopped
+    networks:
+      - autotune-network
+    depends_on:
+      - prometheus
+
+  # Load generator for testing
+  load-generator:
+    image: alpine:latest
+    container_name: autotune-load-generator
+    command: |
+      sh -c "
+        apk add --no-cache curl &&
+        echo 'Starting load generation...' &&
+        while true; do
+          curl -s http://autotune-demo:8000/api/allocate?size=1024 > /dev/null;
+          curl -s http://autotune-demo:8000/api/process > /dev/null;
+          sleep 0.1;
+        done
+      "
+    restart: unless-stopped
+    networks:
+      - autotune-network
+    depends_on:
+      - autotune-demo
+
+  # cAdvisor for container metrics
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.47.0
+    container_name: autotune-cadvisor
+    ports:
+      - "8081:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    privileged: true
+    restart: unless-stopped
+    networks:
+      - autotune-network
+    command:
+      - '--housekeeping_interval=10s'
+      - '--docker_only=true'
+
+networks:
+  autotune-network:
+    driver: bridge
+    name: autotune-network
+
+volumes:
+  prometheus-data:
+    name: autotune-prometheus-data
+  grafana-data:
+    name: autotune-grafana-data
